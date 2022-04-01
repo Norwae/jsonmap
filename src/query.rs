@@ -1,4 +1,4 @@
-use std::borrow::{Borrow, Cow};
+use std::borrow::Cow;
 use std::ops::BitAnd;
 use crate::model::JsonElement;
 
@@ -8,12 +8,27 @@ pub struct QueryContext<'a> {
     root_element: &'a JsonElement
 }
 
-#[derive(Eq, PartialEq, Debug, Clone, Copy)]
-pub struct Safety {
-    pub unbounded_size: bool
+impl <'a> From<&'a JsonElement> for QueryContext<'a> {
+    fn from(json: &'a JsonElement) -> Self {
+        QueryContext {
+            current_element: Cow::Borrowed(json),
+            root_element: json
+        }
+    }
 }
 
-static SAFE: Safety = Safety { unbounded_size: true};
+#[derive(Eq, PartialEq, Debug, Clone, Copy)]
+pub struct Safety {
+    unbounded_size: bool
+}
+
+impl Safety {
+    fn is_safe(&self) -> bool {
+        !self.unbounded_size
+    }
+}
+
+static SAFE: Safety = Safety { unbounded_size: false };
 
 impl BitAnd for Safety {
     type Output = Safety;
@@ -38,29 +53,84 @@ impl Query for Const {
     }
 }
 
-fn select_index(idx: usize) -> impl Query {
-    struct SelectIndex(usize);
+fn construct_array(declarations: Vec<Box<dyn Query>>) -> impl Query {
+    impl Query for Vec<Box<dyn Query>> {
+        fn perform<'q>(&self, ctx: QueryContext<'q>) -> Cow<'q, JsonElement> {
+            let results = self.iter().map(|q|q.perform(ctx.clone()).into_owned()).collect();
 
-    impl Query for SelectIndex {
-        fn perform<'a>(&self, ctx: QueryContext<'a>) -> Cow<'a, JsonElement> {
+            Cow::Owned(JsonElement::Array(results))
+        }
+
+        fn safety(&self) -> Safety {
+            self.iter().fold(SAFE, |previous_safe, next| previous_safe & next.safety())
+        }
+    }
+
+    declarations
+}
+
+fn construct_object<'a>(declarations: Vec<(&'a str, Box<dyn Query>)>) -> impl Query + 'a {
+    impl <'name> Query for Vec<(&'name str, Box<dyn Query>)> {
+        fn perform<'q>(&self, ctx: QueryContext<'q>) -> Cow<'q, JsonElement> {
+            let key_value_pairs = self.iter().map(|tpl|{
+                let (k, query) = tpl;
+                (k.to_string(), query.perform(ctx.clone()).into_owned())
+            }).collect();
+
+            Cow::Owned(JsonElement::Object(key_value_pairs))
+        }
+
+        fn safety(&self) -> Safety {
+            self.iter().fold(SAFE, |previous_safe, next| previous_safe & next.1.safety())
+        }
+    }
+
+    declarations
+}
+
+fn select_member<'a>(name: &'a str) -> impl Query + 'a  {
+    impl <'name> Query for &'name str {
+        fn perform<'q>(&self, ctx: QueryContext<'q>) -> Cow<'q, JsonElement> {
             match ctx.current_element {
-                Cow::Borrowed(JsonElement::Array(vec)) if self.0 < vec.len() => {
-                    Cow::Borrowed(&vec[self.0])
+                Cow::Borrowed(JsonElement::Object(vec)) => {
+                    vec.iter()
+                        .find(|e| &e.0.as_str() == self)
+                        .map(|t|Cow::Borrowed(&t.1))
+                        .unwrap_or(Cow::Owned(JsonElement::Null))
                 }
-                Cow::Owned(JsonElement::Array(mut vec)) if self.0 < vec.len() => {
-                    let elem = vec.swap_remove(self.0);
-                    Cow::Owned(elem)
+                Cow::Owned(JsonElement::Object(vec)) => {
+                    vec.into_iter()
+                        .find(|e| &e.0.as_str() == self)
+                        .map(|t|Cow::Owned(t.1))
+                        .unwrap_or(Cow::Owned(JsonElement::Null))
                 }
                 _ => Cow::Owned(JsonElement::Null)
             }
         }
     }
-    SelectIndex(idx)
+    name
 }
 
-fn and_then<A: Query, B: Query>(a: A, b: B) -> impl Query {
-    struct Compose<A, B>(A, B);
-    impl <A: Query, B: Query> Query for Compose<A, B> {
+fn select_index(idx: usize) -> impl Query {
+    impl Query for usize {
+        fn perform<'a>(&self, ctx: QueryContext<'a>) -> Cow<'a, JsonElement> {
+            match ctx.current_element {
+                Cow::Borrowed(JsonElement::Array(vec)) if *self < vec.len() => {
+                    Cow::Borrowed(&vec[*self])
+                }
+                Cow::Owned(JsonElement::Array(mut vec)) if *self < vec.len() => {
+                    Cow::Owned(vec.swap_remove(*self))
+                }
+                _ => Cow::Owned(JsonElement::Null)
+            }
+        }
+    }
+    idx
+}
+
+fn and_then(a: Box<dyn Query>, b: Box<dyn Query>) -> impl Query {
+    struct Compose(Box<dyn Query>, Box<dyn Query>);
+    impl Query for Compose {
         fn perform<'a>(&self, ctx: QueryContext<'a>) -> Cow<'a, JsonElement> {
             let root_element = ctx.root_element;
             let current_element = self.0.perform(ctx);
@@ -97,6 +167,10 @@ fn root() -> impl Query {
     impl Query for RootQuery {
         fn perform<'a>(&self, ctx: QueryContext<'a>) -> Cow<'a, JsonElement>{
             Cow::Borrowed(ctx.root_element)
+        }
+
+        fn safety(&self) -> Safety {
+            Safety { unbounded_size: true }
         }
     }
 
@@ -159,7 +233,7 @@ mod tests {
                 root_element: &input
             };
 
-            assert_destructures_into!(and_then(root(), constant_bool(true)).perform(ctx), JsonElement::Bool(true))
+            assert_destructures_into!(and_then(Box::new(root()), Box::new(constant_bool(true))).perform(ctx), JsonElement::Bool(true))
         }
 
         #[test]
@@ -176,7 +250,91 @@ mod tests {
                 root_element: &input
             };
 
+            assert_destructures_into!(select_index(2).perform(ctx), JsonElement::Number(nr), (nr - 18f64).abs() < 1e-40);
+            let ctx = QueryContext {
+                current_element: Cow::Owned(input.clone()),
+                root_element: &input
+            };
             assert_destructures_into!(select_index(2).perform(ctx), JsonElement::Number(nr), (nr - 18f64).abs() < 1e-40)
+        }
+
+        #[test]
+        fn member_projection() {
+            let input = JsonElement::Object(
+                    vec![("a".to_string(), JsonElement::Null),
+                         ("c".to_string(), JsonElement::Text("Moo".to_string())),
+                         ("b".to_string(), JsonElement::Text("Bar".to_string())),
+                    ]
+                );
+            let ctx = QueryContext {
+                current_element: Cow::Borrowed(&input),
+                root_element: &input
+            };
+
+            assert_destructures_into!(select_member("c").perform(ctx), JsonElement::Text(str), "Moo" == str);
+            let ctx = QueryContext {
+                current_element: Cow::Owned(input.clone()),
+                root_element: &input
+            };
+
+            assert_destructures_into!(select_member("c").perform(ctx), JsonElement::Text(str), "Moo" == str);
+        }
+
+        #[test]
+        fn construction(){
+
+            let input = JsonElement::Array(vec![
+                JsonElement::Object(
+                    vec![("a".to_string(), JsonElement::Null)]
+                ),
+                JsonElement::Bool(true),
+                JsonElement::Number(18f64)
+            ]);
+            let ctx = QueryContext::from(&input);
+            assert_destructures_into!(construct_array(vec![Box::new(null()), Box::new(constant_bool(true))]).perform(ctx.clone()),
+                JsonElement::Array(elems),
+                if let JsonElement::Bool(true) = elems[1] { if let JsonElement::Null = elems[0] { true } else { false }  } else { false}
+            );
+
+            assert_destructures_into!(construct_object(vec![("foo", Box::new(null()))]).perform(ctx.clone()),
+                JsonElement::Object(elems), elems[0].0 == "foo")
+        }
+    }
+    mod safety {
+        use crate::query::*;
+
+        #[test]
+        fn save_by_default() {
+            impl Query for () {
+                fn perform<'q>(&self, _ctx: QueryContext<'q>) -> Cow<'q, JsonElement> {
+                    unreachable!()
+                }
+            }
+
+            assert!(().safety().is_safe())
+        }
+        #[test]
+        fn unsafe_root_reference() {
+            assert!(!root().safety().is_safe())
+        }
+
+        #[test]
+        fn conditionally_save_composition() {
+            assert!(!and_then(Box::new(root()), Box::new(constant_bool(false))).safety().is_safe());
+            assert!(and_then(Box::new(constant_string("foo")), Box::new(constant_bool(false))).safety().is_safe())
+        }
+
+        #[test]
+        fn conditionally_save_array_construct() {
+            assert!(!construct_array(vec![Box::new(root()), Box::new(constant_bool(false))]).safety().is_safe());
+            assert!(construct_array(vec![Box::new(constant_string("bar")), Box::new(constant_bool(false))]).safety().is_safe());
+        }
+
+        #[test]
+        fn conditionally_save_object_construct() {
+
+            assert!(!construct_object(vec![("a", Box::new(root())), ("b", Box::new(constant_bool(false)))]).safety().is_safe());
+            assert!(construct_object(vec![("a", Box::new(constant_string("baz"))), ("b", Box::new(constant_bool(false)))]).safety().is_safe());
         }
     }
 }
