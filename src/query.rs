@@ -337,4 +337,38 @@ mod tests {
             assert!(construct_object(vec![("a", Box::new(constant_string("baz"))), ("b", Box::new(constant_bool(false)))]).safety().is_safe());
         }
     }
+    mod example {
+        use crate::query::*;
+
+        #[test]
+        fn flatten_address() {
+            let input = JsonElement::Object(vec![
+                ("person".to_string(), JsonElement::Object(vec![
+                    ("first_names".to_string(), JsonElement::Text("Lizzy".to_string())),
+                    ("last_names".to_string(), JsonElement::Text("Sparks".to_string()))
+                ])),
+                ("addresses".to_string(), JsonElement::Array(vec![
+                    JsonElement::Object(vec![
+                        ("street".to_string(), JsonElement::Text("910 Howizzer Lane".to_string()))
+                    ])
+                ]))
+            ]);
+            let transform =
+                construct_object(vec![
+                    ("firstname", Box::new(and_then(Box::new(select_member("person")), Box::new(select_member("first_names"))))),
+                    ("lastname", Box::new(and_then(Box::new(select_member("person")), Box::new(select_member("last_names"))))),
+                    ("street", Box::new(and_then(Box::new(select_member("addresses")), Box::new(and_then(
+                        Box::new(select_index(0)),
+                        Box::new(select_member("street")))))
+                    ))
+                ]);
+
+            let transformed = transform.perform(QueryContext::from(&input)).into_owned();
+            assert_eq!(transformed, JsonElement::Object(vec![
+                ("firstname".to_string(), JsonElement::Text("Lizzy".to_string())),
+                ("lastname".to_string(), JsonElement::Text("Sparks".to_string())),
+                ("street".to_string(), JsonElement::Text("910 Howizzer Lane".to_string()))
+            ]));
+        }
+    }
 }
