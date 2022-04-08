@@ -4,8 +4,8 @@ use crate::model::JsonElement;
 
 #[derive(Debug, Clone)]
 pub struct QueryContext<'a> {
-    current_element: Cow<'a, JsonElement>,
-    root_element: &'a JsonElement
+    pub(crate) current_element: Cow<'a, JsonElement>,
+    pub(crate) root_element: &'a JsonElement
 }
 
 impl <'a> From<&'a JsonElement> for QueryContext<'a> {
@@ -53,7 +53,7 @@ impl Query for Const {
     }
 }
 
-fn construct_array(declarations: Vec<Box<dyn Query>>) -> impl Query {
+pub fn construct_array(declarations: Vec<Box<dyn Query>>) -> impl Query {
     impl Query for Vec<Box<dyn Query>> {
         fn perform<'q>(&self, ctx: QueryContext<'q>) -> Cow<'q, JsonElement> {
             let results = self.iter().map(|q|q.perform(ctx.clone()).into_owned()).collect();
@@ -69,38 +69,40 @@ fn construct_array(declarations: Vec<Box<dyn Query>>) -> impl Query {
     declarations
 }
 
-fn construct_object<'a>(declarations: Vec<(&'a str, Box<dyn Query>)>) -> impl Query + 'a {
-    impl <'name> Query for Vec<(&'name str, Box<dyn Query>)> {
+pub fn construct_object(declarations: Vec<(&str, Box<dyn Query>)>) -> impl Query {
+    struct ConstructObject(Vec<(String, Box<dyn Query>)>);
+    impl Query for ConstructObject {
         fn perform<'q>(&self, ctx: QueryContext<'q>) -> Cow<'q, JsonElement> {
-            let key_value_pairs = self.iter().map(|tpl|{
+            let key_value_pairs = self.0.iter().map(|tpl|{
                 let (k, query) = tpl;
-                (k.to_string(), query.perform(ctx.clone()).into_owned())
+                (k.clone(), query.perform(ctx.clone()).into_owned())
             }).collect();
 
             Cow::Owned(JsonElement::Object(key_value_pairs))
         }
 
         fn safety(&self) -> Safety {
-            self.iter().fold(SAFE, |previous_safe, next| previous_safe & next.1.safety())
+            self.0.iter().fold(SAFE, |previous_safe, next| previous_safe & next.1.safety())
         }
     }
 
-    declarations
+    ConstructObject(declarations.into_iter().map(|(n, q)|(n.to_string(), q)).collect())
 }
 
-fn select_member<'a>(name: &'a str) -> impl Query + 'a  {
-    impl <'name> Query for &'name str {
+pub fn select_member(name: &str) -> impl Query  {
+    struct SelectMember(String);
+    impl  Query for SelectMember {
         fn perform<'q>(&self, ctx: QueryContext<'q>) -> Cow<'q, JsonElement> {
             match ctx.current_element {
                 Cow::Borrowed(JsonElement::Object(vec)) => {
                     vec.iter()
-                        .find(|e| &e.0.as_str() == self)
+                        .find(|(next, _)| next.as_str() == self.0)
                         .map(|t|Cow::Borrowed(&t.1))
                         .unwrap_or(Cow::Owned(JsonElement::Null))
                 }
                 Cow::Owned(JsonElement::Object(vec)) => {
                     vec.into_iter()
-                        .find(|e| &e.0.as_str() == self)
+                        .find(|(e, _)| e.as_str() == self.0)
                         .map(|t|Cow::Owned(t.1))
                         .unwrap_or(Cow::Owned(JsonElement::Null))
                 }
@@ -108,10 +110,10 @@ fn select_member<'a>(name: &'a str) -> impl Query + 'a  {
             }
         }
     }
-    name
+    SelectMember(name.to_string())
 }
 
-fn select_index(idx: usize) -> impl Query {
+pub fn select_index(idx: usize) -> impl Query {
     impl Query for usize {
         fn perform<'a>(&self, ctx: QueryContext<'a>) -> Cow<'a, JsonElement> {
             match ctx.current_element {
@@ -128,7 +130,7 @@ fn select_index(idx: usize) -> impl Query {
     idx
 }
 
-fn and_then(a: Box<dyn Query>, b: Box<dyn Query>) -> impl Query {
+pub fn and_then(a: Box<dyn Query>, b: Box<dyn Query>) -> impl Query {
     struct Compose(Box<dyn Query>, Box<dyn Query>);
     impl Query for Compose {
         fn perform<'a>(&self, ctx: QueryContext<'a>) -> Cow<'a, JsonElement> {
@@ -146,23 +148,23 @@ fn and_then(a: Box<dyn Query>, b: Box<dyn Query>) -> impl Query {
     Compose(a, b)
 }
 
-fn constant_bool(v: bool) -> impl Query {
+pub fn constant_bool(v: bool) -> impl Query {
     Const(JsonElement::Bool(v))
 }
 
-fn constant_nr(nr: f64) -> impl Query {
+pub fn constant_nr(nr: f64) -> impl Query {
     Const(JsonElement::Number(nr))
 }
 
-fn constant_string(string: &str) -> impl Query {
+pub fn constant_string(string: &str) -> impl Query {
     Const(JsonElement::Text(string.to_string()))
 }
 
-fn null() -> impl Query {
+pub fn null() -> impl Query {
     Const(JsonElement::Null)
 }
 
-fn root() -> impl Query {
+pub fn root() -> impl Query {
     struct Root;
     impl Query for Root {
         fn perform<'a>(&self, ctx: QueryContext<'a>) -> Cow<'a, JsonElement>{
@@ -177,7 +179,7 @@ fn root() -> impl Query {
     Root
 }
 
-fn array_size() -> impl Query {
+pub fn array_size() -> impl Query {
     struct ArraySize;
     impl Query for ArraySize {
         fn perform<'q>(&self, ctx: QueryContext<'q>) -> Cow<'q, JsonElement> {
