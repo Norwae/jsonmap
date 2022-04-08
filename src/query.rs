@@ -163,8 +163,8 @@ fn null() -> impl Query {
 }
 
 fn root() -> impl Query {
-    struct RootQuery;
-    impl Query for RootQuery {
+    struct Root;
+    impl Query for Root {
         fn perform<'a>(&self, ctx: QueryContext<'a>) -> Cow<'a, JsonElement>{
             Cow::Borrowed(ctx.root_element)
         }
@@ -174,7 +174,20 @@ fn root() -> impl Query {
         }
     }
 
-    RootQuery
+    Root
+}
+
+fn array_size() -> impl Query {
+    struct ArraySize;
+    impl Query for ArraySize {
+        fn perform<'q>(&self, ctx: QueryContext<'q>) -> Cow<'q, JsonElement> {
+            match ctx.current_element.as_ref() {
+                JsonElement::Array(vec) => Cow::Owned(JsonElement::Number(vec.len() as f64)),
+                _ => Cow::Owned(JsonElement::Null)
+            }
+        }
+    }
+    ArraySize
 }
 
 #[cfg(test)]
@@ -360,14 +373,16 @@ mod tests {
                     ("street", Box::new(and_then(Box::new(select_member("addresses")), Box::new(and_then(
                         Box::new(select_index(0)),
                         Box::new(select_member("street")))))
-                    ))
+                    )),
+                    ("nr_of_addrs", Box::new(and_then(Box::new(select_member("addresses")), Box::new(array_size()))))
                 ]);
 
             let transformed = transform.perform(QueryContext::from(&input)).into_owned();
             assert_eq!(transformed, JsonElement::Object(vec![
                 ("firstname".to_string(), JsonElement::Text("Lizzy".to_string())),
                 ("lastname".to_string(), JsonElement::Text("Sparks".to_string())),
-                ("street".to_string(), JsonElement::Text("910 Howizzer Lane".to_string()))
+                ("street".to_string(), JsonElement::Text("910 Howizzer Lane".to_string())),
+                ("nr_of_addrs".to_string(), JsonElement::Number(1f64))
             ]));
         }
     }
