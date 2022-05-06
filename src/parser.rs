@@ -1,4 +1,5 @@
-use std::cell::RefCell;
+use std::borrow::BorrowMut;
+use std::cell::{Ref, RefCell};
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
 
@@ -7,10 +8,9 @@ use nom::bytes::complete::{escaped, tag};
 use nom::character::complete::{alpha1, digit1, none_of, space0};
 use nom::combinator::{map, map_res, opt, recognize};
 use nom::Err;
-use nom::error::Error as NomError;
 use nom::IResult;
-use nom::multi::{many0, many1, separated_list1};
-use nom::number::complete::{double, f64, float};
+use nom::multi::{many0, many1, separated_list0, separated_list1};
+use nom::number::complete::{double,  float};
 use nom::sequence::{delimited, terminated, tuple};
 
 use crate::query as q;
@@ -157,6 +157,43 @@ fn path<'s, QB: QueryBuilder>(qb: &RefCell<QB>, i: &'s str) -> IResult<&'s str, 
     Ok((rest, result))
 }
 
+fn construct_array<'s, QB: QueryBuilder>(qb: &RefCell<QB>, i: &'s str) -> IResult<&'s str, Box<dyn Query>> {
+    let trailing_space_allowed = |parser| terminated(parser, space0);
+    let open = trailing_space_allowed(tag("["));
+    let close = trailing_space_allowed(tag("]"));
+    let field_sep = trailing_space_allowed(tag(","));
+    let field_decls = separated_list0(field_sep, |s|query(qb, s));
+
+    let object = map(field_decls, |v|qb.borrow_mut().construct_array(v));
+
+    delimited(open, object, close)(i)
+}
+
+fn construct_object<'s, QB: QueryBuilder>(qb: &RefCell<QB>, i: &'s str) -> IResult<&'s str, Box<dyn Query>> {
+    let trailing_space_allowed = |parser| terminated(parser, space0);
+    let open = trailing_space_allowed(tag("{"));
+    let close = trailing_space_allowed(tag("}"));
+    let field_sep = trailing_space_allowed(tag(","));
+    let key_value_sep = trailing_space_allowed(tag(":"));
+    let field_decl = map(tuple(
+        (name, key_value_sep, |s|query(qb, s))
+    ), |(key, _, value)| (key, value));
+    let field_decls = separated_list0(field_sep, field_decl);
+
+    let object = map(field_decls, |v|qb.borrow_mut().construct_object(v));
+
+    delimited(open, object, close)(i)
+}
+
+fn query<'s, QB: QueryBuilder>(qb: &RefCell<QB>, i: &'s str) -> IResult<&'s str, Box<dyn Query>> {
+    alt((
+        |s|literal(&qb, s),
+        |s|construct_array(&qb, s),
+        |s|construct_object(&qb, s),
+        |s|path(&qb, s)
+    ))(i)
+}
+
 pub fn parse_query(input: &str) -> Result<Box<dyn Query>, ParseError> {
     parse_query_with(DefaultQueryBuilder, input)
 }
@@ -164,10 +201,7 @@ pub fn parse_query(input: &str) -> Result<Box<dyn Query>, ParseError> {
 
 pub fn parse_query_with<T: QueryBuilder>(qb: T, input: &str) -> Result<Box<dyn Query>, ParseError>  {
     let qb = RefCell::new(qb);
-    let (rest, parsed) = alt((
-        |s|literal(&qb, s),
-        |s|path(&qb, s)
-    ))(input)?;
+    let (rest, parsed) = query(&qb, input)?;
 
     if rest.trim() == "" {
         Ok(parsed)
@@ -186,7 +220,7 @@ mod test {
     use std::mem::swap;
 
     use crate::model::JsonElement;
-    use crate::parser::{literal, path, QueryBuilder};
+    use crate::parser::{literal, parse_query, path, QueryBuilder};
     use crate::query::{Query, QueryContext};
 
     #[derive(Clone, Debug, Eq, PartialEq)]
@@ -334,5 +368,18 @@ mod test {
             QueryBuilderAction { method: "null", args: "".to_string() },
             QueryBuilderAction { method: "root", args: "".to_string() },
         ])
+    }
+
+    #[test]
+    fn full_parse(){
+        let parsed = parse_query("{a: 17, b: subtree.value, c: [1, null, true, subtree]}").unwrap();
+
+        let subtree = JsonElement::Object(vec![("value".to_string(), JsonElement::Number(10f64))]);
+        let input = JsonElement::Object(vec![("subtree".to_string(), subtree.clone())]);
+
+        let ctx = QueryContext::from(&input);
+        let result = parsed.perform(ctx).into_owned();
+
+        assert_eq!(result, JsonElement::Object(vec![("a".to_string(), JsonElement::Number(17f64)), ("b".to_string(), JsonElement::Number(10f64)), ("c".to_string(), JsonElement::Array(vec![JsonElement::Number(1f64), JsonElement::Null, JsonElement::Bool(true), subtree]))]));
     }
 }
