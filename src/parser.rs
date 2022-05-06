@@ -310,7 +310,7 @@ mod test {
 
     #[test]
     fn parse_simple_path() {
-        let mut test = TestUtil::new();
+        let test = TestUtil::new();
         assert!(path(&test, "a.b.c").is_ok());
         assert_eq!(test.into_inner().0, vec![
             QueryBuilderAction { method: "select_member", args: "a".to_string() },
@@ -323,7 +323,7 @@ mod test {
 
     #[test]
     fn parse_with_lots_of_whitespace() {
-        let mut test = TestUtil::new();
+        let test = TestUtil::new();
         assert!(path(&mut test, "d  .   e .  f  ").is_ok());
         assert_eq!(test.into_inner().0, vec![
             QueryBuilderAction { method: "select_member", args: "d".to_string() },
@@ -337,7 +337,7 @@ mod test {
 
     #[test]
     fn parse_quoted_field() {
-        let mut test = TestUtil::new();
+        let test = TestUtil::new();
         assert!(path(&mut test, "a.\"complex quoted field name, including special characters like . or []\".c").is_ok());
         assert_eq!(test.into_inner().0, vec![
             QueryBuilderAction { method: "select_member", args: "a".to_string() },
@@ -350,7 +350,7 @@ mod test {
 
     #[test]
     fn parse_literals() {
-        let mut test = TestUtil::new();
+        let test = TestUtil::new();
         assert!(literal(&test, "true").is_ok());
         assert!(literal(&test, "false").is_ok());
         assert!(literal(&test, "16").is_ok());
